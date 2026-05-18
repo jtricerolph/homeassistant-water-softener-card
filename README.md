@@ -96,11 +96,42 @@ low_capacity_warning: 10
 
 ## ESPHome Integration
 
-This card is designed to work with ESPHome sensors monitoring a Clack WS1 TT duplex water softener. The ESPHome configuration should provide:
+A ready-to-use ESPHome configuration is included as `water-softener.yaml`. Flash it to an **ESP32-C3 Super Mini** and all required entities are created automatically.
 
-- **GPIO for Relay 1** - Water consumption pulses
-- **GPIO for Relay 2** - Regeneration active signal
-- **Ultrasonic sensor** - Salt level measurement in brine tank
+### Hardware Required
+
+- ESP32-C3 Super Mini
+- AJ-SR04M waterproof ultrasonic sensor (UART mode — remove R19 resistor)
+- 2× 10 kΩ resistors + 2× 15 kΩ resistors (voltage dividers for 5V→3.3V signals)
+
+### Wiring Summary
+
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| Clack RLY1 (dry contact) | GPIO1 | COM → GND, RLY1 → GPIO1 (pull-up, active LOW) |
+| Flow meter pulse | GPIO0 | White wire via 10kΩ/15kΩ voltage divider |
+| AJ-SR04M TX/ECHO | GPIO10 | Via 10kΩ/15kΩ voltage divider (ESP RX) |
+| AJ-SR04M RX/TRIG | GPIO3 | Direct 3.3V (ESP TX) |
+
+### Clack Relay Configuration
+
+In the Clack controller menu: **NEXT + DOWN → RELAY → Set Time on**
+- Actuation delay: `0s`
+- Duration: full regen time (e.g. `90 min`)
+
+### Configurable Values (no reflash needed)
+
+All system parameters are adjustable from Home Assistant:
+
+| Entity | Default | Description |
+|--------|---------|-------------|
+| Resin Capacity Per Tank | 2000 L | Set to your resin tank rated capacity |
+| Brine Tank Height | 0.70 m | Interior height of your brine tank |
+| Flow Meter Pulses Per Litre | 16 p/L | Calibrate to your meter (check datasheet) |
+| Backwash Duration | 10 min | Match Clack controller programme |
+| Brine Draw Duration | 60 min | Match Clack controller programme |
+| Fast Rinse Duration | 10 min | Match Clack controller programme |
+| Brine Fill Duration | 10 min | Match Clack controller programme |
 
 ### Regeneration Stages
 

@@ -1,0 +1,416 @@
+################################################################################
+# Clack WS1 TT Duplex — ESPHome Configuration
+# Board: ESP32-C3 Super Mini
+#
+# All system values (tank capacity, brine tank height, regen cycle times,
+# flow meter pulses-per-litre) are configurable from Home Assistant — no
+# reflashing required after initial setup.
+#
+# Wiring (ESP32-C3 Super Mini):
+#
+#   Clack relay dry contact (RLY1 + COM):
+#     COM  → ESP GND
+#     RLY1 → GPIO1  (internal pull-up, active LOW)
+#
+#   Clack METER connector (tap GND + white signal wire only):
+#     Black (GND)   → ESP GND
+#     White (pulse) → voltage divider → GPIO0
+#                     [White → 10kΩ → GPIO0 → 15kΩ → GND]
+#
+#   AJ-SR04M ultrasonic sensor (UART mode, no R19 resistor):
+#     VCC  → ESP 5V
+#     GND  → ESP GND
+#     TX/ECHO → voltage divider → GPIO10 (ESP RX)
+#               [TX → 10kΩ → GPIO10 → 15kΩ → GND]
+#     RX/TRIG → GPIO3  (ESP TX, direct — 3.3V signal)
+#
+#   Configure relay in Clack controller menu:
+#     NEXT + DOWN → RELAY → Set Time on
+#     Actuation delay: 0s, Duration: full regen time (e.g. 90 min)
+#
+################################################################################
+
+esphome:
+  name: water-softener
+  friendly_name: Water Softener
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "WaterSoftener"
+    password: !secret ap_password
+
+improv_serial:
+
+captive_portal:
+
+# ── Time ──────────────────────────────────────────────────────────────────────
+time:
+  - platform: homeassistant
+    id: sntp_time
+    on_time:
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        then:
+          - globals.set:
+              id: daily_usage_l
+              value: "0.0"
+
+# ── UART for AJ-SR04M ─────────────────────────────────────────────────────────
+uart:
+  id: uart_jsn
+  rx_pin: GPIO10   # sensor TX/ECHO → voltage divider → here
+  tx_pin: GPIO3    # sensor RX/TRIG ← here (direct, 3.3V)
+  baud_rate: 9600
+
+# ── Configurable values (set from HA, no reflash needed) ──────────────────────
+number:
+  - platform: template
+    name: "Resin Capacity Per Tank"
+    id: resin_capacity
+    unit_of_measurement: "L"
+    icon: "mdi:water-percent"
+    min_value: 100
+    max_value: 10000
+    step: 100
+    restore_value: true
+    initial_value: 2000
+    optimistic: true
+
+  - platform: template
+    name: "Brine Tank Height"
+    id: tank_height
+    unit_of_measurement: "m"
+    icon: "mdi:ruler"
+    min_value: 0.10
+    max_value: 3.00
+    step: 0.01
+    restore_value: true
+    initial_value: 0.70
+    optimistic: true
+
+  - platform: template
+    name: "Flow Meter Pulses Per Litre"
+    id: meter_ppl
+    unit_of_measurement: "p/L"
+    icon: "mdi:pulse"
+    min_value: 1
+    max_value: 1000
+    step: 1
+    restore_value: true
+    initial_value: 16
+    optimistic: true
+
+  - platform: template
+    name: "Backwash Duration"
+    id: dur_backwash
+    unit_of_measurement: "min"
+    icon: "mdi:timer"
+    min_value: 1
+    max_value: 60
+    step: 1
+    restore_value: true
+    initial_value: 10
+    optimistic: true
+
+  - platform: template
+    name: "Brine Draw Duration"
+    id: dur_brine_draw
+    unit_of_measurement: "min"
+    icon: "mdi:timer"
+    min_value: 1
+    max_value: 120
+    step: 1
+    restore_value: true
+    initial_value: 60
+    optimistic: true
+
+  - platform: template
+    name: "Fast Rinse Duration"
+    id: dur_fast_rinse
+    unit_of_measurement: "min"
+    icon: "mdi:timer"
+    min_value: 1
+    max_value: 60
+    step: 1
+    restore_value: true
+    initial_value: 10
+    optimistic: true
+
+  - platform: template
+    name: "Brine Fill Duration"
+    id: dur_brine_fill
+    unit_of_measurement: "min"
+    icon: "mdi:timer"
+    min_value: 1
+    max_value: 60
+    step: 1
+    restore_value: true
+    initial_value: 10
+    optimistic: true
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+globals:
+  - id: tank_in_service  # 0 = Tank A, 1 = Tank B
+    type: int
+    restore_value: true
+    initial_value: "0"
+
+  - id: regen_start_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: tank_a_remaining
+    type: float
+    restore_value: true
+    initial_value: "2000"
+
+  - id: tank_b_remaining
+    type: float
+    restore_value: true
+    initial_value: "2000"
+
+  - id: daily_usage_l
+    type: float
+    restore_value: false
+    initial_value: "0"
+
+  - id: total_usage_l
+    type: float
+    restore_value: true
+    initial_value: "0"
+
+  - id: last_regen_a
+    type: std::string
+    restore_value: false
+    initial_value: '"unknown"'
+
+  - id: last_regen_b
+    type: std::string
+    restore_value: false
+    initial_value: '"unknown"'
+
+# ── Sensors ───────────────────────────────────────────────────────────────────
+sensor:
+
+  - platform: pulse_meter
+    pin:
+      number: GPIO0
+      mode:
+        input: true
+        pullup: true
+    id: flow_pulse_raw
+    internal: true
+    internal_filter: 50ms
+    timeout: 5s
+    on_value:
+      then:
+        - lambda: |-
+            float vol = 1.0f / id(meter_ppl).state;
+            id(daily_usage_l) += vol;
+            id(total_usage_l) += vol;
+            if (id(tank_in_service) == 0)
+              id(tank_a_remaining) = max(0.0f, id(tank_a_remaining) - vol);
+            else
+              id(tank_b_remaining) = max(0.0f, id(tank_b_remaining) - vol);
+
+  - platform: template
+    name: "Flow Rate"
+    id: flow_rate_sensor
+    unit_of_measurement: "L/min"
+    device_class: volume_flow_rate
+    icon: "mdi:water"
+    update_interval: 10s
+    lambda: return id(flow_pulse_raw).state / id(meter_ppl).state;
+
+  - platform: template
+    name: "Daily Usage"
+    unit_of_measurement: "L"
+    device_class: water
+    state_class: total_increasing
+    icon: "mdi:water"
+    update_interval: 60s
+    lambda: return id(daily_usage_l);
+
+  - platform: template
+    name: "Total Usage"
+    unit_of_measurement: "L"
+    device_class: water
+    state_class: total_increasing
+    icon: "mdi:water"
+    update_interval: 60s
+    lambda: return id(total_usage_l);
+
+  - platform: template
+    name: "Tank A Capacity Remaining"
+    id: tank_a_capacity_sensor
+    unit_of_measurement: "L"
+    icon: "mdi:water-percent"
+    update_interval: 30s
+    lambda: return id(tank_a_remaining);
+
+  - platform: template
+    name: "Tank B Capacity Remaining"
+    id: tank_b_capacity_sensor
+    unit_of_measurement: "L"
+    icon: "mdi:water-percent"
+    update_interval: 30s
+    lambda: return id(tank_b_remaining);
+
+  - platform: template
+    name: "Tank A Capacity Percent"
+    unit_of_measurement: "%"
+    update_interval: 30s
+    lambda: return (id(tank_a_remaining) / id(resin_capacity).state) * 100.0f;
+
+  - platform: template
+    name: "Tank B Capacity Percent"
+    unit_of_measurement: "%"
+    update_interval: 30s
+    lambda: return (id(tank_b_remaining) / id(resin_capacity).state) * 100.0f;
+
+  - platform: template
+    name: "Regen Time Remaining"
+    unit_of_measurement: "min"
+    update_interval: 60s
+    lambda: |-
+      if (!id(regen_active_sensor).state) return 0.0f;
+      int total = (int)(id(dur_backwash).state + id(dur_brine_draw).state +
+                        id(dur_fast_rinse).state + id(dur_brine_fill).state);
+      int elapsed = (int)((millis() - id(regen_start_ms)) / 60000);
+      return (float)max(0, total - elapsed);
+
+  - platform: jsn_sr04t
+    id: brine_distance
+    name: "Brine Tank Distance"
+    internal: true
+    uart_id: uart_jsn
+    update_interval: 30s
+    filters:
+      - median:
+          window_size: 5
+          send_every: 5
+          send_first_at: 3
+
+  - platform: template
+    name: "Salt Level"
+    unit_of_measurement: "%"
+    icon: "mdi:shaker-outline"
+    update_interval: 30s
+    lambda: |-
+      if (isnan(id(brine_distance).state)) return {};
+      float pct = ((id(tank_height).state - id(brine_distance).state)
+                    / id(tank_height).state) * 100.0f;
+      return clamp(pct, 0.0f, 100.0f);
+
+  - platform: template
+    name: "Brine Tank Level Live"
+    unit_of_measurement: "%"
+    update_interval: 30s
+    lambda: |-
+      if (isnan(id(brine_distance).state)) return {};
+      float pct = ((id(tank_height).state - id(brine_distance).state)
+                    / id(tank_height).state) * 100.0f;
+      return clamp(pct, 0.0f, 100.0f);
+
+# ── Binary sensors ────────────────────────────────────────────────────────────
+binary_sensor:
+
+  - platform: gpio
+    pin:
+      number: GPIO1
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: regen_active_sensor
+    name: "Regeneration Active"
+    device_class: running
+    filters:
+      - delayed_on: 3s
+      - delayed_off: 10s
+    on_press:
+      then:
+        - lambda: |-
+            id(regen_start_ms) = millis();
+            if (id(tank_in_service) == 0) {
+              id(tank_in_service) = 1;
+              auto t = id(sntp_time).now();
+              if (t.is_valid()) id(last_regen_a) = t.strftime("%Y-%m-%dT%H:%M:%S");
+            } else {
+              id(tank_in_service) = 0;
+              auto t = id(sntp_time).now();
+              if (t.is_valid()) id(last_regen_b) = t.strftime("%Y-%m-%dT%H:%M:%S");
+            }
+    on_release:
+      then:
+        - lambda: |-
+            if (id(tank_in_service) == 1)
+              id(tank_a_remaining) = id(resin_capacity).state;
+            else
+              id(tank_b_remaining) = id(resin_capacity).state;
+
+# ── Text sensors ──────────────────────────────────────────────────────────────
+text_sensor:
+
+  - platform: template
+    name: "Tank In Service"
+    update_interval: 10s
+    lambda: |-
+      return id(tank_in_service) == 0
+        ? std::string("Tank A")
+        : std::string("Tank B");
+
+  - platform: template
+    name: "Regen Stage"
+    update_interval: 30s
+    lambda: |-
+      if (!id(regen_active_sensor).state) return std::string("Idle");
+      int elapsed = (int)((millis() - id(regen_start_ms)) / 60000);
+      int t1 = (int)id(dur_backwash).state;
+      int t2 = t1 + (int)id(dur_brine_draw).state;
+      int t3 = t2 + (int)id(dur_fast_rinse).state;
+      int t4 = t3 + (int)id(dur_brine_fill).state;
+      if (elapsed < t1) return std::string("Backwash");
+      if (elapsed < t2) return std::string("Brine Draw");
+      if (elapsed < t3) return std::string("Fast Rinse");
+      if (elapsed < t4) return std::string("Brine Fill");
+      return std::string("Completing");
+
+  - platform: template
+    name: "Tank A Last Regen"
+    update_interval: 60s
+    lambda: return id(last_regen_a);
+
+  - platform: template
+    name: "Tank B Last Regen"
+    update_interval: 60s
+    lambda: return id(last_regen_b);
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP"
+
+# ── Status LED ────────────────────────────────────────────────────────────────
+status_led:
+  pin:
+    number: GPIO8
+    inverted: true
