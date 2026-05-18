@@ -199,14 +199,14 @@ globals:
     initial_value: "0"
 
   - id: last_regen_a
-    type: std::string
-    restore_value: false
-    initial_value: '"unknown"'
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
 
   - id: last_regen_b
-    type: std::string
-    restore_value: false
-    initial_value: '"unknown"'
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
 
 # ── Sensors ───────────────────────────────────────────────────────────────────
 sensor:
@@ -351,14 +351,13 @@ binary_sensor:
       then:
         - lambda: |-
             id(regen_start_ms) = millis();
+            auto t = id(sntp_time).now();
             if (id(tank_in_service) == 0) {
               id(tank_in_service) = 1;
-              auto t = id(sntp_time).now();
-              if (t.is_valid()) id(last_regen_a) = t.strftime("%Y-%m-%dT%H:%M:%S");
+              if (t.is_valid()) id(last_regen_a) = (uint32_t)t.timestamp;
             } else {
               id(tank_in_service) = 0;
-              auto t = id(sntp_time).now();
-              if (t.is_valid()) id(last_regen_b) = t.strftime("%Y-%m-%dT%H:%M:%S");
+              if (t.is_valid()) id(last_regen_b) = (uint32_t)t.timestamp;
             }
     on_release:
       then:
@@ -398,12 +397,22 @@ text_sensor:
   - platform: template
     name: "Tank A Last Regen"
     update_interval: 60s
-    lambda: return id(last_regen_a);
+    lambda: |-
+      if (id(last_regen_a) == 0) return std::string("unknown");
+      time_t ts = (time_t)id(last_regen_a);
+      char buf[20];
+      strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&ts));
+      return std::string(buf);
 
   - platform: template
     name: "Tank B Last Regen"
     update_interval: 60s
-    lambda: return id(last_regen_b);
+    lambda: |-
+      if (id(last_regen_b) == 0) return std::string("unknown");
+      time_t ts = (time_t)id(last_regen_b);
+      char buf[20];
+      strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&ts));
+      return std::string(buf);
 
   - platform: wifi_info
     ip_address:
