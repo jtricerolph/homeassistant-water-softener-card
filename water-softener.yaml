@@ -88,7 +88,7 @@ number:
     unit_of_measurement: "L"
     icon: "mdi:water-percent"
     min_value: 100
-    max_value: 10000
+    max_value: 20000
     step: 100
     restore_value: true
     initial_value: 2000
