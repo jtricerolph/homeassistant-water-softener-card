@@ -17,7 +17,7 @@
 #     White (pulse) → voltage divider → GPIO0
 #                     [White → 10kΩ → GPIO0 → 15kΩ → GND]
 #
-#   AJ-SR04M ultrasonic sensor (UART mode, no R19 resistor):
+#   AJ-SR04M ultrasonic sensor (UART mode, R19 jumper present):
 #     VCC  → ESP 5V
 #     GND  → ESP GND
 #     TX/ECHO → voltage divider → GPIO10 (ESP RX)
@@ -76,9 +76,31 @@ time:
 # ── UART for AJ-SR04M ─────────────────────────────────────────────────────────
 uart:
   id: uart_jsn
-  rx_pin: GPIO10   # sensor TX/ECHO → voltage divider → here
-  tx_pin: GPIO3    # sensor RX/TRIG ← here (direct, 3.3V)
+  rx_pin: GPIO10
+  tx_pin: GPIO3
   baud_rate: 9600
+
+# ── AJ-SR04M polling ──────────────────────────────────────────────────────────
+interval:
+  - interval: 30s
+    then:
+      - lambda: id(uart_jsn).write_byte(0x55);
+      - delay: 300ms
+      - lambda: |-
+          std::string resp;
+          while (id(uart_jsn).available()) {
+            uint8_t b;
+            id(uart_jsn).read_byte(&b);
+            if (b != '\r' && b != '\n')
+              resp += (char)b;
+          }
+          auto gap = resp.find("Gap=");
+          auto mm  = resp.find("mm");
+          if (gap != std::string::npos && mm != std::string::npos && mm > gap + 4) {
+            float d = atof(resp.substr(gap + 4, mm - gap - 4).c_str()) / 1000.0f;
+            if (d > 0.01f && d < 5.0f)
+              id(brine_distance).publish_state(d);
+          }
 
 # ── Configurable values (set from HA, no reflash needed) ──────────────────────
 number:
@@ -298,17 +320,13 @@ sensor:
       int elapsed = (int)((millis() - id(regen_start_ms)) / 60000);
       return (float)max(0, total - elapsed);
 
-  - platform: jsn_sr04t
+  - platform: template
     id: brine_distance
-    name: "Brine Tank Distance"
     internal: true
-    uart_id: uart_jsn
-    update_interval: 30s
-    filters:
-      - median:
-          window_size: 5
-          send_every: 5
-          send_first_at: 3
+    unit_of_measurement: "m"
+    accuracy_decimals: 3
+    update_interval: never
+    lambda: return {};
 
   - platform: template
     name: "Salt Level"
