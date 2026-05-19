@@ -18,11 +18,11 @@
 #                     [White → 10kΩ → GPIO0 → 15kΩ → GND]
 #
 #   AJ-SR04M ultrasonic sensor (UART mode, R19 jumper present):
-#     VCC  → ESP 5V
-#     GND  → ESP GND
+#     VCC     → ESP 5V
+#     GND     → ESP GND
 #     TX/ECHO → voltage divider → GPIO10 (ESP RX)
 #               [TX → 10kΩ → GPIO10 → 15kΩ → GND]
-#     RX/TRIG → GPIO3  (ESP TX, direct — 3.3V signal)
+#     RX/TRIG → GPIO3 (ESP TX, direct — 3.3V signal)
 #
 #   Configure relay in Clack controller menu:
 #     NEXT + DOWN → RELAY → Set Time on
@@ -31,7 +31,7 @@
 ################################################################################
 
 esphome:
-  name: water-softener
+  name: water-softener-monitor
   friendly_name: Water Softener
 
 esp32:
@@ -82,25 +82,34 @@ uart:
 
 # ── AJ-SR04M polling ──────────────────────────────────────────────────────────
 interval:
-  - interval: 30s
+  - interval: 5s
     then:
-      - lambda: id(uart_jsn).write_byte(0x55);
-      - delay: 300ms
-      - lambda: |-
-          std::string resp;
-          while (id(uart_jsn).available()) {
-            uint8_t b;
-            id(uart_jsn).read_byte(&b);
-            if (b != '\r' && b != '\n')
-              resp += (char)b;
-          }
-          auto gap = resp.find("Gap=");
-          auto mm  = resp.find("mm");
-          if (gap != std::string::npos && mm != std::string::npos && mm > gap + 4) {
-            float d = atof(resp.substr(gap + 4, mm - gap - 4).c_str()) / 1000.0f;
-            if (d > 0.01f && d < 5.0f)
-              id(brine_distance).publish_state(d);
-          }
+      - if:
+          condition:
+            lambda: return (millis() - id(last_brine_poll_ms)) >= (uint32_t)(id(brine_interval).state * 1000.0f);
+          then:
+            - lambda: |-
+                id(last_brine_poll_ms) = millis();
+                id(uart_jsn).write_byte(0x55);
+            - delay: 300ms
+            - lambda: |-
+                std::string resp;
+                while (id(uart_jsn).available()) {
+                  uint8_t b;
+                  id(uart_jsn).read_byte(&b);
+                  if (b != '\r' && b != '\n')
+                    resp += (char)b;
+                }
+                auto gap = resp.find("Gap=");
+                auto mm  = resp.find("mm");
+                if (gap != std::string::npos && mm != std::string::npos && mm > gap + 4) {
+                  float d = atof(resp.substr(gap + 4, mm - gap - 4).c_str()) / 1000.0f;
+                  if (d > 0.01f && d < 5.0f) {
+                    id(brine_distance).publish_state(d);
+                    if (id(regen_active_sensor).state && d > id(max_regen_dist))
+                      id(max_regen_dist) = d;
+                  }
+                }
 
 # ── Configurable values (set from HA, no reflash needed) ──────────────────────
 number:
@@ -188,9 +197,21 @@ number:
     initial_value: 10
     optimistic: true
 
+  - platform: template
+    name: "Brine Sensor Update Interval"
+    id: brine_interval
+    unit_of_measurement: "s"
+    icon: "mdi:timer-refresh"
+    min_value: 5
+    max_value: 300
+    step: 5
+    restore_value: true
+    initial_value: 30
+    optimistic: true
+
 # ── Globals ───────────────────────────────────────────────────────────────────
 globals:
-  - id: tank_in_service  # 0 = Tank A, 1 = Tank B
+  - id: tank_in_service
     type: int
     restore_value: true
     initial_value: "0"
@@ -226,6 +247,26 @@ globals:
     initial_value: "0"
 
   - id: last_regen_b
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+
+  - id: last_brine_poll_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: max_regen_dist
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+
+  - id: salt_level_pct
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+
+  - id: salt_level_updated
     type: uint32_t
     restore_value: true
     initial_value: "0"
@@ -329,17 +370,6 @@ sensor:
     lambda: return {};
 
   - platform: template
-    name: "Salt Level"
-    unit_of_measurement: "%"
-    icon: "mdi:shaker-outline"
-    update_interval: 30s
-    lambda: |-
-      if (isnan(id(brine_distance).state)) return {};
-      float pct = ((id(tank_height).state - id(brine_distance).state)
-                    / id(tank_height).state) * 100.0f;
-      return clamp(pct, 0.0f, 100.0f);
-
-  - platform: template
     name: "Brine Tank Level Live"
     unit_of_measurement: "%"
     update_interval: 30s
@@ -348,6 +378,26 @@ sensor:
       float pct = ((id(tank_height).state - id(brine_distance).state)
                     / id(tank_height).state) * 100.0f;
       return clamp(pct, 0.0f, 100.0f);
+
+  - platform: template
+    name: "Brine Lowest Regen Level"
+    unit_of_measurement: "%"
+    icon: "mdi:arrow-collapse-down"
+    update_interval: 30s
+    lambda: |-
+      if (id(max_regen_dist) < 0.01f) return {};
+      float pct = ((id(tank_height).state - id(max_regen_dist))
+                    / id(tank_height).state) * 100.0f;
+      return clamp(pct, 0.0f, 100.0f);
+
+  - platform: template
+    name: "Salt Level"
+    unit_of_measurement: "%"
+    icon: "mdi:shaker-outline"
+    update_interval: 30s
+    lambda: |-
+      if (id(salt_level_updated) == 0) return {};
+      return id(salt_level_pct);
 
 # ── Binary sensors ────────────────────────────────────────────────────────────
 binary_sensor:
@@ -369,6 +419,7 @@ binary_sensor:
       then:
         - lambda: |-
             id(regen_start_ms) = millis();
+            id(max_regen_dist) = 0.0f;
             auto t = id(sntp_time).now();
             if (id(tank_in_service) == 0) {
               id(tank_in_service) = 1;
@@ -384,6 +435,13 @@ binary_sensor:
               id(tank_a_remaining) = id(resin_capacity).state;
             else
               id(tank_b_remaining) = id(resin_capacity).state;
+            if (id(max_regen_dist) > 0.01f) {
+              float pct = ((id(tank_height).state - id(max_regen_dist))
+                            / id(tank_height).state) * 100.0f;
+              id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
+              auto t = id(sntp_time).now();
+              if (t.is_valid()) id(salt_level_updated) = (uint32_t)t.timestamp;
+            }
 
 # ── Text sensors ──────────────────────────────────────────────────────────────
 text_sensor:
@@ -432,9 +490,35 @@ text_sensor:
       strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&ts));
       return std::string(buf);
 
+  - platform: template
+    name: "Salt Level Last Updated"
+    update_interval: 60s
+    lambda: |-
+      if (id(salt_level_updated) == 0) return std::string("never");
+      time_t ts = (time_t)id(salt_level_updated);
+      char buf[20];
+      strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&ts));
+      return std::string(buf);
+
   - platform: wifi_info
     ip_address:
       name: "IP"
+
+# ── Button ────────────────────────────────────────────────────────────────────
+button:
+  - platform: template
+    name: "Update Salt Level"
+    icon: "mdi:shaker"
+    on_press:
+      then:
+        - lambda: |-
+            if (!isnan(id(brine_distance).state) && id(brine_distance).state > 0.01f) {
+              float pct = ((id(tank_height).state - id(brine_distance).state)
+                            / id(tank_height).state) * 100.0f;
+              id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
+              auto t = id(sntp_time).now();
+              if (t.is_valid()) id(salt_level_updated) = (uint32_t)t.timestamp;
+            }
 
 # ── Status LED ────────────────────────────────────────────────────────────────
 status_led:
