@@ -24,6 +24,10 @@
 #               [TX → 10kΩ → GPIO10 → 15kΩ → GND]
 #     RX/TRIG → GPIO3 (ESP TX, direct — 3.3V signal)
 #
+#   Salt fill button (momentary, NO):
+#     One terminal → GPIO2
+#     Other terminal → GND
+#
 #   Configure relay in Clack controller menu:
 #     NEXT + DOWN → RELAY → Set Time on
 #     Actuation delay: 0s, Duration: full regen time (e.g. 90 min)
@@ -135,6 +139,18 @@ number:
     step: 0.01
     restore_value: true
     initial_value: 0.70
+    optimistic: true
+
+  - platform: template
+    name: "Brine Tank Full Distance"
+    id: full_distance
+    unit_of_measurement: "m"
+    icon: "mdi:arrow-collapse-up"
+    min_value: 0.05
+    max_value: 0.50
+    step: 0.01
+    restore_value: true
+    initial_value: 0.20
     optimistic: true
 
   - platform: template
@@ -362,9 +378,10 @@ sensor:
       return (float)max(0, total - elapsed);
 
   - platform: template
+    name: "Brine Tank Distance"
     id: brine_distance
-    internal: true
     unit_of_measurement: "m"
+    icon: "mdi:arrow-expand-vertical"
     accuracy_decimals: 3
     update_interval: never
     lambda: return {};
@@ -375,8 +392,8 @@ sensor:
     update_interval: 30s
     lambda: |-
       if (isnan(id(brine_distance).state)) return {};
-      float pct = ((id(tank_height).state - id(brine_distance).state)
-                    / id(tank_height).state) * 100.0f;
+      float usable = id(tank_height).state - id(full_distance).state;
+      float pct = ((id(tank_height).state - id(brine_distance).state) / usable) * 100.0f;
       return clamp(pct, 0.0f, 100.0f);
 
   - platform: template
@@ -386,8 +403,8 @@ sensor:
     update_interval: 30s
     lambda: |-
       if (id(max_regen_dist) < 0.01f) return {};
-      float pct = ((id(tank_height).state - id(max_regen_dist))
-                    / id(tank_height).state) * 100.0f;
+      float usable = id(tank_height).state - id(full_distance).state;
+      float pct = ((id(tank_height).state - id(max_regen_dist)) / usable) * 100.0f;
       return clamp(pct, 0.0f, 100.0f);
 
   - platform: template
@@ -436,11 +453,33 @@ binary_sensor:
             else
               id(tank_b_remaining) = id(resin_capacity).state;
             if (id(max_regen_dist) > 0.01f) {
-              float pct = ((id(tank_height).state - id(max_regen_dist))
-                            / id(tank_height).state) * 100.0f;
+              float usable = id(tank_height).state - id(full_distance).state;
+              float pct = ((id(tank_height).state - id(max_regen_dist)) / usable) * 100.0f;
               id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
               auto t = id(sntp_time).now();
-              if (t.is_valid()) id(salt_level_updated) = (uint32_t)t.timestamp;
+              id(salt_level_updated) = t.is_valid() ? (uint32_t)t.timestamp : 1;
+            }
+
+  - platform: gpio
+    pin:
+      number: GPIO2
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Salt Fill Button"
+    internal: true
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!isnan(id(brine_distance).state) && id(brine_distance).state > 0.01f) {
+              float usable = id(tank_height).state - id(full_distance).state;
+              float pct = ((id(tank_height).state - id(brine_distance).state) / usable) * 100.0f;
+              id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
+              auto t = id(sntp_time).now();
+              id(salt_level_updated) = t.is_valid() ? (uint32_t)t.timestamp : 1;
             }
 
 # ── Text sensors ──────────────────────────────────────────────────────────────
@@ -495,6 +534,7 @@ text_sensor:
     update_interval: 60s
     lambda: |-
       if (id(salt_level_updated) == 0) return std::string("never");
+      if (id(salt_level_updated) == 1) return std::string("set (no timestamp)");
       time_t ts = (time_t)id(salt_level_updated);
       char buf[20];
       strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&ts));
@@ -513,11 +553,11 @@ button:
       then:
         - lambda: |-
             if (!isnan(id(brine_distance).state) && id(brine_distance).state > 0.01f) {
-              float pct = ((id(tank_height).state - id(brine_distance).state)
-                            / id(tank_height).state) * 100.0f;
+              float usable = id(tank_height).state - id(full_distance).state;
+              float pct = ((id(tank_height).state - id(brine_distance).state) / usable) * 100.0f;
               id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
               auto t = id(sntp_time).now();
-              if (t.is_valid()) id(salt_level_updated) = (uint32_t)t.timestamp;
+              id(salt_level_updated) = t.is_valid() ? (uint32_t)t.timestamp : 1;
             }
 
 # ── Status LED ────────────────────────────────────────────────────────────────
