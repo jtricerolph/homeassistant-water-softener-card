@@ -110,6 +110,8 @@ interval:
                   float d = atof(resp.substr(gap + 4, mm - gap - 4).c_str()) / 1000.0f;
                   if (d > 0.01f && d < 5.0f) {
                     id(brine_distance).publish_state(d);
+                    float usable = id(tank_height).state - id(full_distance).state;
+                    id(brine_level_live).publish_state(clamp(((id(tank_height).state - d) / usable) * 100.0f, 0.0f, 100.0f));
                     if (id(regen_active_sensor).state && d > id(max_regen_dist))
                       id(max_regen_dist) = d;
                   }
@@ -223,6 +225,30 @@ number:
     step: 5
     restore_value: true
     initial_value: 30
+    optimistic: true
+
+  - platform: template
+    name: "Salt Low Threshold"
+    id: salt_low_pct
+    unit_of_measurement: "%"
+    icon: "mdi:shaker-outline"
+    min_value: 5
+    max_value: 80
+    step: 5
+    restore_value: true
+    initial_value: 40
+    optimistic: true
+
+  - platform: template
+    name: "Salt Warning Threshold"
+    id: salt_warning_pct
+    unit_of_measurement: "%"
+    icon: "mdi:shaker-outline"
+    min_value: 5
+    max_value: 80
+    step: 5
+    restore_value: true
+    initial_value: 20
     optimistic: true
 
 # ── Globals ───────────────────────────────────────────────────────────────────
@@ -388,13 +414,10 @@ sensor:
 
   - platform: template
     name: "Brine Tank Level Live"
+    id: brine_level_live
     unit_of_measurement: "%"
-    update_interval: 30s
-    lambda: |-
-      if (isnan(id(brine_distance).state)) return {};
-      float usable = id(tank_height).state - id(full_distance).state;
-      float pct = ((id(tank_height).state - id(brine_distance).state) / usable) * 100.0f;
-      return clamp(pct, 0.0f, 100.0f);
+    update_interval: never
+    lambda: return {};
 
   - platform: template
     name: "Brine Lowest Regen Level"
@@ -409,6 +432,7 @@ sensor:
 
   - platform: template
     name: "Salt Level"
+    id: salt_level_sensor
     unit_of_measurement: "%"
     icon: "mdi:shaker-outline"
     update_interval: 30s
@@ -458,6 +482,12 @@ binary_sensor:
               id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
               auto t = id(sntp_time).now();
               id(salt_level_updated) = t.is_valid() ? (uint32_t)t.timestamp : 1;
+              id(salt_level_sensor).publish_state(id(salt_level_pct));
+              id(salt_level_updated_sensor).publish_state(
+                id(salt_level_updated) > 1
+                  ? id(sntp_time).now().strftime("%Y-%m-%dT%H:%M:%S")
+                  : std::string("set (no timestamp)")
+              );
             }
 
   - platform: gpio
@@ -480,6 +510,12 @@ binary_sensor:
               id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
               auto t = id(sntp_time).now();
               id(salt_level_updated) = t.is_valid() ? (uint32_t)t.timestamp : 1;
+              id(salt_level_sensor).publish_state(id(salt_level_pct));
+              id(salt_level_updated_sensor).publish_state(
+                id(salt_level_updated) > 1
+                  ? id(sntp_time).now().strftime("%Y-%m-%dT%H:%M:%S")
+                  : std::string("set (no timestamp)")
+              );
             }
 
 # ── Text sensors ──────────────────────────────────────────────────────────────
@@ -531,6 +567,7 @@ text_sensor:
 
   - platform: template
     name: "Salt Level Last Updated"
+    id: salt_level_updated_sensor
     update_interval: 60s
     lambda: |-
       if (id(salt_level_updated) == 0) return std::string("never");
@@ -539,6 +576,15 @@ text_sensor:
       char buf[20];
       strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&ts));
       return std::string(buf);
+
+  - platform: template
+    name: "Salt Level Status"
+    update_interval: 60s
+    lambda: |-
+      if (id(salt_level_updated) == 0) return std::string("unknown");
+      if (id(salt_level_pct) > id(salt_low_pct).state) return std::string("OK");
+      if (id(salt_level_pct) > id(salt_warning_pct).state) return std::string("Low");
+      return std::string("Warning");
 
   - platform: wifi_info
     ip_address:
@@ -558,6 +604,12 @@ button:
               id(salt_level_pct) = clamp(pct, 0.0f, 100.0f);
               auto t = id(sntp_time).now();
               id(salt_level_updated) = t.is_valid() ? (uint32_t)t.timestamp : 1;
+              id(salt_level_sensor).publish_state(id(salt_level_pct));
+              id(salt_level_updated_sensor).publish_state(
+                id(salt_level_updated) > 1
+                  ? id(sntp_time).now().strftime("%Y-%m-%dT%H:%M:%S")
+                  : std::string("set (no timestamp)")
+              );
             }
 
 # ── Status LED ────────────────────────────────────────────────────────────────
